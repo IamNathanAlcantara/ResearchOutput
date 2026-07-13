@@ -1,320 +1,594 @@
 # Exit Screen Walkthrough — Nineteen58 Meeting
 
-**Date:** Monday, 13 July 2026 — 4:00 PM  
-**Presenter:** Nathaniel Alcantara  
-**Audience:** Nineteen58 team  
-**Topic:** Exit modal implementation in the EasyEquities Identity Server (IDP)
+**Date:** Monday, 13 July 2026 | 4:00 PM – 5:00 PM (UTC+8)  
+**Presenter:** Nathaniel Alcantara (Senior Full Stack Developer, OEPE Team)  
+**Organizer:** Carrie Ann Singh (Head of Partner Enablement)  
+**Audience:** Nineteen58 team (third-party AI analytics provider)
+
+### Attendees
+
+| Name | Role |
+|------|------|
+| Carrie Ann Singh | Head of Partner Enablement (EE) |
+| kieran@nineteen58.co.za | Nineteen58 |
+| James MacRobert | Nineteen58 |
+| Eimee Monica Solis | OEPE Team (EE) |
+| Bea Jewel Vines | OEPE Team (EE) |
+| Kim Geraldine Fabe (KG) | OEPE Team (EE) — built the original modal & API |
+| Dan Kenneth Coloma | OEPE Team (EE) |
+| Nathaniel Alcantara | OEPE Team (EE) — exit modal redesign |
 
 ---
 
-## Quick Reference: What Nineteen58 Does
+## Agenda at a Glance
 
-- Enterprise AI agent company (Johannesburg, SA — founded 2023)
-- Builds omnichannel AI agents: WhatsApp, Voice, Web, Email
-- Specialises in customer service automation, retention campaigns, win-back
-- Outcome-based pricing: they only get paid on measurable results
-- Likely use case here: **AI-driven outreach to departing EasyEquities users** using the exit data we capture
-
----
-
-## 1. Agenda
-
-| # | Topic | Time |
-|---|-------|------|
-| 1 | Context: Why the exit modal exists | 2 min |
-| 2 | Original implementation (OEPE-1820, KG) | 3 min |
-| 3 | Redesigned exit modal (OEPE-2263, PR #624) | 10 min |
-| 4 | Data model: `ExitRegistration` table | 5 min |
-| 5 | Data consumption options for Nineteen58 | 5 min |
-| 6 | Historical data & migration notes | 3 min |
-| 7 | Q&A / Next steps | Open |
+| # | Section | Duration | Key Action |
+|---|---------|----------|------------|
+| 1 | Opening | 1–2 min | Set the scene |
+| 2 | The Problem (why we redesigned) | 2 min | Show old 4 reasons vs new 8 |
+| 3 | What Changed (the redesign) | 5–7 min | Walk through reasons, contact toggle, X-close |
+| 4 | Data Model (`ExitRegistration` table) | 3 min | Show columns, what's in API vs not |
+| 5 | Your Existing API (OEPE-2165) | 3–4 min | **Critical** — acknowledge KG's API, discuss gaps |
+| 6 | Technical Architecture | 2–3 min | Write path + read path flow |
+| 7 | Test Coverage | 1 min | 30 unit tests |
+| 8 | Value for Nineteen58 | 2 min | What's immediate vs coming soon |
+| 9 | Action Items & Discussion | 3–5 min | PhoneNumber, UserDeviceId, production sign-off |
+| 10 | Closing | 1 min | Summarize & final Qs |
 
 ---
 
-## 2. Context: Why the Exit Modal Exists
+## Section 1 — Opening (1–2 min)
 
-**Purpose:** When a user initiates account closure / departure from EasyEquities, we present an exit modal to:
-
-- Capture the **reason** for leaving (structured data)
-- Optionally capture **contact preference** so someone can reach out
-- Feed churn analytics for product and business teams
-- (New) Enable **Nineteen58's AI agents** to initiate personalised retention conversations
-
-**Where it lives:** `identityserver` repository — the Identity Provider (IDP) that handles authentication, SSO, consent UI, and login forms.
-
-**Flow:**  
-User initiates departure → IDP presents exit modal → User selects reason(s) → Optionally toggles "contact me" → Submits → Data saved to `ExitRegistration` SQL table → Account closure proceeds
+> "Hi everyone, thanks for joining. I'm Nathaniel from the OEPE team."
+>
+> "Today I'll walk you through the changes we've made to the registration exit screen on our Identity Server."
+>
+> "I know your team is already consuming data via the exit feedback API that KG set up earlier — what we've done is significantly enrich the data that flows into it."
+>
+> "I'll cover what changed in the modal, what new data fields you'll see, and what updates are still needed on the API side."
 
 ---
 
-## 3. Original Implementation — OEPE-1820 (KG's Work)
+## Section 2 — The Problem (2 min)
 
-**Developer:** Kim Geraldine Fabe (KG)  
-**Ticket:** OEPE-1820  
-**Status:** Merged (this is what's on `main` today before the redesign)
+**Context:** When a user is on the registration page and clicks **"Cancel Registration"**, a modal pops up asking why they're leaving. The response is saved to the `ExitRegistration` SQL table and exposed to Nineteen58 via the exit feedback API.
 
-### What KG Built
+### What Was Wrong
+
+- Only **4 generic reasons** — too broad for actionable insight
+- No way for users to request follow-up contact
+- No phone number capture
+- Email fields were coded but **never enabled** (commented out in HTML)
+- The data Nineteen58 was receiving reflected these limitations
+
+### Old Exit Reasons (OEPE-1820)
+
+| # | Reason |
+|---|--------|
+| 1 | I need more information before I sign up |
+| 2 | I don't have time right now |
+| 3 | I'm not interested in opening an account |
+| 4 | There was an error or technical issue |
+| 5 | Other (free text) |
+
+---
+
+## Section 3 — What Changed (5–7 min)
+
+### 3A. 8 Granular Exit Reasons (was 4)
+
+| Constant | Reason Text | Category |
+|----------|-------------|----------|
+| ExitReason1 | Just exploring, not interested right now | Casual browser |
+| ExitReason2 | I need to know more before I commit | Information gap |
+| ExitReason3 | I don't have time right now | Time constraint |
+| ExitReason4 | I want to login not register | Wrong flow — existing user |
+| ExitReason5 | I already have an account | Potential duplicate |
+| ExitReason6 | I'm stuck on choosing a username | UX friction |
+| ExitReason7 | I'm stuck on creating a password | UX friction |
+| ExitReasonOther | Other | Free-text input |
+
+> **Talking point:** "Reasons 6 and 7 are particularly interesting for your analysis — they pinpoint exactly WHERE in the form the user got stuck."
+
+> **Talking point:** "These are defined as constants in the C# backend (`Constants.ExitReason1` through `ExitReason7` + `ExitReasonOther`), so frontend and database stay consistent."
+
+### 3B. Conditional Self-Service Messages
+
+Two reasons trigger helpful in-context messages:
+
+| Reason | Message Shown | Effect |
+|--------|---------------|--------|
+| "I want to login not register" | "Already one of us? Good news — your account is waiting." + login link | Redirects user to login |
+| "I already have an account" | Links to recover username or reset password | Reduces unnecessary drop-offs |
+
+> **Talking point:** "This should actually REDUCE some of your drop-off counts — because these users are being redirected to the right flow instead of just leaving."
+
+### 3C. Contact Me Toggle + Email & Phone
+
+New section: **"Would you like us to get in touch with you?"** with a toggle switch.
+
+When toggled ON, two fields appear:
+
+| Field | Details |
+|-------|---------|
+| **Email** | Pre-populated from the registration form if user already typed one |
+| **Phone** | Hardcoded `+27` (South Africa) prefix, expects 9 digits without leading zero |
+
+**Validation rules:**
+
+| When | Behavior |
+|------|----------|
+| On blur (email) | Regex: `^([a-zA-Z0-9_'\-.]+)@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.)|(([a-zA-Z0-9\-]+\.)+))([a-zA-Z]{2,63}|[0-9]{1,3})$` |
+| On blur (phone) | Regex: `^[1-9]\d{8}$` — 9 digits, no leading zero |
+| On blur (empty) | No error shown (user hasn't typed anything yet) |
+| On submit | If contact toggle ON, at least one of email or phone is required |
+| Visual feedback | Green left border = valid, Red = invalid |
+
+> **Talking point:** "Users who opt in are warm leads — this gives you a re-engagement signal."
+
+### 3D. X-Close Button Behavior (**IMPORTANT**)
+
+This is a critical behavioral detail:
+
+| Scenario | What Gets Saved |
+|----------|----------------|
+| User selected a reason, then clicks X | **Saves the selected reason** (NOT "Closed without feedback") |
+| User entered contact info, then clicks X | **Saves the contact data** alongside the reason |
+| User selected nothing, clicks X | Saves `ExitReason = "Closed without feedback"` |
+| Contact validation fails on X-close | Modal stays open (doesn't close) |
+
+> **Talking point:** "This means you'll get richer data even from users who don't explicitly click 'Send Feedback'. You'll see fewer 'Closed without feedback' entries and more specific reasons."
+
+---
+
+## Section 4 — Data Model (3 min)
+
+**Table:** `ExitRegistration` (same table the API already reads from)
+
+| Column | Type | In API? | Notes |
+|--------|------|---------|-------|
+| ExitReasonId | bigint (PK, auto-incr) | **Yes** | Internal record identifier |
+| UserDeviceId | string | **No** | From DeviceId cookie or auto-generated GUID. In DB since OEPE-1820, never exposed |
+| ExitReason | string | **Yes** | Selected reason text, or "Closed without feedback". NOW 8 values instead of 4 |
+| ExitReasonOther | string (nullable) | **Yes** | Free-text, only when user selects "Other" |
+| ReferralPartner | string (nullable) | **Yes** | `productid` from landing URL (e.g., "capitec", "easyequities") |
+| EmailAddress | string (nullable) | **Yes** | Validated email. Sanitized to null if format invalid |
+| **PhoneNumber** | **string (nullable)** | **No** | **NEW (OEPE-2263).** SA phone 9-digit. Sanitized to null if invalid. **NOT YET IN API** |
+| DateCreatedUTC | datetime | **Yes** | UTC timestamp (ISO 8601) |
+
+### Server-Side Validation Philosophy
+
+> "We never reject a feedback submission due to bad contact data. The exit reason is the primary data; contact info is secondary."
+
+- **Approach:** Sanitization over rejection — invalid email/phone formats are set to `null`, the record is still saved
+- Both email and phone regexes are **pre-compiled** (`RegexOptions.Compiled`) for performance
+
+---
+
+## Section 5 — Your Existing API (OEPE-2165 by KG) (**Critical Section**)
+
+> **Talking point:** "I want to acknowledge the API that KG already built for you under OEPE-2165."
+
+### API Overview
 
 | Aspect | Detail |
 |--------|--------|
-| Exit reasons | **4 reasons** (fixed list) |
-| Contact fields | **None** — no toggle, no email, no phone |
-| Data storage | `ExitRegistration` SQL table |
-| UI | Basic modal with radio/checkbox selection |
-| Tests | Initial unit test coverage |
+| Endpoint | `GET /api/exit-feedback` |
+| Auth | OAuth 2.0 client credentials |
+| Client ID | `nineteen58-exit-feedback` |
+| Scope | `idp_exit_feedback_endpoint` |
+| Token expiry | 1 hour — cache and reuse, do not request per call |
+| UAT | `https://uatidentity.openeasy.io/api/exit-feedback` |
+| Production | `https://identity.openeasy.io/api/exit-feedback` **(TBC — pending sign-off)** |
+| Token endpoint (UAT) | `https://uatidentity.openeasy.io/connect/token` |
 
-### The 4 Original Reasons
+### Query Parameters
 
-1. I'm not using the platform enough
-2. I found a better alternative
-3. I'm unhappy with the service
-4. Other
+| Parameter | Format | Default | Notes |
+|-----------|--------|---------|-------|
+| `fromDate` | YYYY-MM-DD | `toDate` minus 365 days | Inclusive |
+| `toDate` | YYYY-MM-DD | Today UTC | Inclusive |
 
-### KG's Other Nineteen58-Related Tickets
+- Case-insensitive parameter names
+- Max 1-year lookback (silently capped if exceeded)
+- Unrecognized params silently ignored
 
-KG was the original developer on the exit modal feature. Her OEPE-1820 work established:
+### Current API Response (what Nineteen58 sees today)
 
-- The `ExitRegistration` database table schema
-- The initial exit modal UI component in the IDP
-- The backend API endpoint to persist exit data
-- The foundational flow where the modal appears during account departure
+```json
+{
+  "records": [
+    {
+      "exitReasonId": 150,
+      "exitReason": "I'm stuck on choosing a username",
+      "exitReasonOther": null,
+      "referralPartner": "easyequities",
+      "emailAddress": "user@example.com",
+      "dateCreatedUtc": "2026-07-10T14:23:01.5"
+    },
+    {
+      "exitReasonId": 149,
+      "exitReason": "Other",
+      "exitReasonOther": "The page loaded slowly",
+      "referralPartner": "capitec",
+      "emailAddress": null,
+      "dateCreatedUtc": "2026-07-10T09:45:12.3"
+    }
+  ],
+  "count": 2
+}
+```
 
-> **Note for Nineteen58:** If you query historical data, records created before the redesign will only have the original 4 reason strings above. Post-redesign records will use the new 8 reasons.
+### Proposed API Response (after follow-up update)
+
+```json
+{
+  "records": [
+    {
+      "exitReasonId": 150,
+      "exitReason": "I'm stuck on choosing a username",
+      "exitReasonOther": null,
+      "referralPartner": "easyequities",
+      "emailAddress": "user@example.com",
+      "phoneNumber": "821234567",
+      "userDeviceId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "dateCreatedUtc": "2026-07-10T14:23:01.5"
+    }
+  ],
+  "count": 1
+}
+```
+
+> **Note:** `phoneNumber` and `userDeviceId` are proposed additions — pending confirmation from Nineteen58 in this meeting.
+
+### What the Good News Is
+
+> "The new exit reasons will appear automatically in your API responses because they come from the same `ExitRegistration` table. **No changes needed on your side for that.**"
+
+### What Won't Appear Yet
+
+> "The API response model (`ExitFeedbackRecord`) doesn't include `phoneNumber`. Similarly, `userDeviceId` has been in the DB since day one but was never exposed."
+
+> "We have a follow-up action to add these fields. I'd like to confirm with you today: **would phoneNumber and userDeviceId be useful for your models?**"
+
+### API Source Files (for internal reference)
+
+| File | Path |
+|------|------|
+| Controller | `src/.../Features/Api/Controllers/ExitFeedbackController.cs` |
+| Response Model | `src/.../Features/Api/Models/ExitFeedbackResponse.cs` |
+| Query Service | `src/.../Features/Api/Services/ExitFeedbackQueryService.cs` |
+| Query Interface | `src/.../Features/Api/Services/IExitFeedbackQueryService.cs` |
+| API Startup | `src/.../Features/Api/ApiStartupExtensions.cs` |
+| Controller Tests | `test/.../Api/Controllers/ExitFeedbackControllerTests.cs` |
+| Service Tests | `test/.../Api/Services/ExitFeedbackQueryServiceTests.cs` |
 
 ---
 
-## 4. Redesigned Exit Modal — OEPE-2263 (PR #624)
+## Section 6 — Technical Architecture (2–3 min)
 
-**Developer:** Nathaniel Alcantara  
-**Ticket:** OEPE-2263  
-**PR:** #624 (already merged to `main`)  
-**Status:** Merged and deployed
+### Write Path (User → Database)
 
-### What Changed
+```
+1. User is on BasicRegistration.cshtml (sign-up page for non-OTP tenants)
+2. User clicks "Cancel Registration"
+3. JavaScript opens exit modal, resets state, pre-populates email from form
+4. User selects a reason, optionally toggles "contact me", enters email/phone
+5. On "Send Feedback" click OR X-close → POST /Registration/SaveFeedback
+6. RegistrationController delegates to RegistrationService.SaveExitFeedbackToDb
+7. Service validates/sanitizes email and phone with pre-compiled Regex
+8. Writes to SQL Server via Entity Framework
+   (ExitRegistrationDbContext → ExitRegistration table)
+```
+
+### Read Path (Nineteen58 → Database)
+
+```
+1. Nineteen58 requests OAuth token:
+   POST /connect/token (client_credentials, scope: idp_exit_feedback_endpoint)
+
+2. Nineteen58 calls:
+   GET /api/exit-feedback?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD
+
+3. ExitFeedbackController validates date range
+   (max 1-year lookback, silently caps if exceeded)
+
+4. ExitFeedbackQueryService queries ExitRegistration table
+   via EF Core (AsNoTracking, ordered by dateCreatedUtc DESC)
+
+5. Returns JSON response with records array and count
+```
+
+### End-to-End Flow Diagram
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                     WRITE PATH                                │
+│                                                               │
+│  User on Registration Page                                    │
+│         │                                                     │
+│         ▼ clicks "Cancel Registration"                        │
+│  ┌─────────────────────────┐                                  │
+│  │    Exit Modal            │                                  │
+│  │  - 8 reasons             │                                  │
+│  │  - Contact toggle        │                                  │
+│  │  - Email + Phone fields  │                                  │
+│  └──────────┬──────────────┘                                  │
+│             │ Submit OR X-close                                │
+│             ▼                                                  │
+│  POST /Registration/SaveFeedback                              │
+│             │                                                  │
+│             ▼                                                  │
+│  RegistrationService.SaveExitFeedbackToDb                     │
+│  (validates email/phone with pre-compiled Regex)              │
+│             │                                                  │
+│             ▼                                                  │
+│  ┌─────────────────────────┐                                  │
+│  │  ExitRegistration Table  │◄─── Same table for both paths   │
+│  │  (SQL Server via EF)     │                                  │
+│  └──────────┬──────────────┘                                  │
+└─────────────┼────────────────────────────────────────────────┘
+              │
+┌─────────────┼────────────────────────────────────────────────┐
+│             │            READ PATH                            │
+│             ▼                                                  │
+│  GET /api/exit-feedback                                       │
+│  (OAuth 2.0 — client: nineteen58-exit-feedback)               │
+│             │                                                  │
+│             ▼                                                  │
+│  ExitFeedbackController → ExitFeedbackQueryService            │
+│  (EF Core, AsNoTracking, ordered by dateCreatedUtc DESC)      │
+│             │                                                  │
+│             ▼                                                  │
+│  JSON Response to Nineteen58                                  │
+│  { records: [...], count: N }                                 │
+└──────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Section 7 — Test Coverage (1 min)
+
+> "30 unit tests covering `SaveExitFeedbackToDb` (the write path), all passing. KG also wrote tests for the API side."
+
+### Exit Modal Unit Tests (30 tests)
+
+| Category | Tests |
+|----------|-------|
+| **Reason saving** | Standard reason saves with null ExitReasonOther; "Other" saves free-text |
+| **Contact saving** | Valid email + phone both saved |
+| **X-close** | With reason → saves reason; With "Other" → saves other-text; No reason → saves "Closed without feedback"; With email → saves email; Without email → saves null |
+| **DeviceId** | Null → generates new GUID; Provided → used as-is |
+| **Sanitization** | Null/empty/whitespace email → null; Null/empty/whitespace phone → null; Invalid email format → null; Invalid phone format → null |
+| **ReferralPartner** | URL with `productid` → extracts partner; URL without → null |
+| **Persistence** | `SaveChangesAsync` is called; `DateCreatedUTC` ≈ `DateTime.UtcNow` |
+
+### API Tests (KG's OEPE-2165)
+
+- `ExitFeedbackControllerTests` — controller authorization, date validation, response structure
+- `ExitFeedbackQueryServiceTests` — query logic, date range filtering, ordering
+
+---
+
+## Section 8 — Value for Nineteen58 (2 min)
+
+### Immediate (no action needed on Nineteen58's side)
+
+- **8 specific drop-off reasons** instead of 4 — the `exitReason` field values change automatically in API responses
+- **Friction-point signals** — reasons 6 and 7 ("stuck on username/password") are new categories to detect
+- **Better X-close granularity** — if a user selected a reason but closed with X, you now get the actual reason instead of just "Closed without feedback"
+
+### Coming Soon (after API update)
+
+- **`phoneNumber` field** — SA mobile numbers for users who opted in to contact
+- **`userDeviceId` field** — device-level identifier for correlating multiple exit events from the same browser
+
+### Heads Up for Nineteen58's Models
+
+- Historical records still have the **old 4 reason strings**. New records from ~July 3 onward have the **8 new strings**
+- Parsing/categorization logic may need updating to handle the new reason values
+- The "Other" reason behavior is unchanged — `exitReason = "Other"` and `exitReasonOther` contains the free text
+
+---
+
+## Section 9 — Action Items & Discussion (3–5 min)
+
+> "I'd like to discuss a few things before we close."
+
+### Items to Confirm
+
+| # | Item | Detail | Owner | Status |
+|---|------|--------|-------|--------|
+| 1 | **API update: PhoneNumber** | Add `phoneNumber` to `ExitFeedbackRecord` and `ExitFeedbackQueryService`. Quick change. Do you want this field? | EasyEquities (Nathaniel/KG) | Pending confirmation |
+| 2 | **API update: UserDeviceId** | Has been in DB since OEPE-1820, never exposed. Useful for correlating repeat drop-offs from same device. Do you want this? | EasyEquities (Nathaniel/KG) | Pending confirmation |
+| 3 | **Nineteen58 model updates** | Parsing logic needs to handle 8 new exit reason strings. Old strings will stop appearing in new records. Do you need a mapping document? | Nineteen58 | Discussion |
+| 4 | **Production API sign-off** | Integration guide notes production is "TBC — pending sign-off". What's the status? | Carrie / DevOps | Check with Carrie |
+| 5 | **Re-engagement flow** | Users who toggle "contact me" are warm leads. How does Nineteen58 plan to use this data? | Nineteen58 / Carrie | Discussion |
+
+### Live Capture (fill in during meeting)
+
+- [ ] PhoneNumber: Confirmed wanted? ___________
+- [ ] UserDeviceId: Confirmed wanted? ___________
+- [ ] Reason mapping document: Needed? ___________
+- [ ] Production timeline: ___________
+- [ ] Re-engagement approach: ___________
+- [ ] Follow-up meeting date: ___________
+- [ ] Jira ticket for API update: ___________
+
+---
+
+## Section 10 — Closing (1 min)
+
+> "To summarize: the exit modal changes are already merged. Your existing API will automatically serve the new exit reasons."
+>
+> "We have a small follow-up to expose `phoneNumber` (and optionally `userDeviceId`) in the API response."
+>
+> "Thanks everyone. Any final questions?"
+
+---
+
+## Appendix A — Reason String Mapping (Old → New)
+
+### Direct Mappings
+
+| Old Reason (OEPE-1820) | New Reason (OEPE-2263) | Change Type |
+|-------------------------|------------------------|-------------|
+| I need more information before I sign up | I need to know more before I commit | **Replaced** (similar intent, new wording) |
+| I don't have time right now | I don't have time right now | **Unchanged** |
+| I'm not interested in opening an account | Just exploring, not interested right now | **Replaced** (similar intent, new wording) |
+| There was an error or technical issue | *(no direct equivalent)* | **Removed** — users can describe via "Other" |
+
+### New Reasons (no old equivalent)
+
+| New Reason | Category |
+|------------|----------|
+| I want to login not register | Wrong flow — existing user |
+| I already have an account | Potential duplicate |
+| I'm stuck on choosing a username | UX friction |
+| I'm stuck on creating a password | UX friction |
+
+### Cutoff Date
+
+Records with `dateCreatedUtc` **before ~July 3, 2026** will have old reason strings.  
+Records **from July 3 onward** will have the new reason strings.
+
+---
+
+## Appendix B — Full Q&A Reference
+
+### API Compatibility
+
+**Q: We're already using the API — will our integration break?**  
+A: No. The API contract is backward-compatible. The `exitReason` field will contain new string values (8 new reasons instead of 4), but the JSON structure is identical. Your code won't break, but your categorization/parsing logic should be updated to recognize the new reason strings.
+
+**Q: When will the new exit reasons start appearing?**  
+A: They already are. The PR was merged to main on July 3. Any records created after that will have the new reason strings.
+
+**Q: Are the exit reason strings stable? Will they change again?**  
+A: They're defined as constants in the C# backend. If we update the wording, we'd coordinate with you in advance.
+
+### Missing Fields
+
+**Q: Where is the PhoneNumber? We don't see it in API responses.**  
+A: Correct — PhoneNumber is saved to the database but the API response model (`ExitFeedbackRecord`) hasn't been updated yet. We need to add `phoneNumber` to `ExitFeedbackRecord` and update the Select projection in `ExitFeedbackQueryService`. Quick change — we can do it this sprint.
+
+**Q: What about UserDeviceId? Can we get that too?**  
+A: Same situation — it's been in the DB since OEPE-1820 but was never mapped into the API response. If it's useful for your models (e.g., correlating repeat drop-offs from the same browser), we can add it alongside PhoneNumber.
+
+### User Behavior
+
+**Q: What if the user doesn't select any reason and just closes?**  
+A: We still save a record with `ExitReason = "Closed without feedback"`. But now, if the user DID select a reason and then clicked X, we save the actual reason — not "Closed without feedback". So you'll see fewer generic entries.
+
+**Q: Can a user submit exit feedback multiple times?**  
+A: Yes. Each time they open the exit modal, it creates a new row. Use `exitReasonId` + `dateCreatedUtc` for de-duplication as noted in the integration guide.
+
+**Q: Does the OTP registration flow also have this exit modal?**  
+A: No. Only the BasicRegistration flow (non-OTP tenants). OTP registration uses a different view without the exit modal.
+
+### Phone Number
+
+**Q: How does the phone number field work? Is it always South African?**  
+A: Currently yes — `+27` prefix, 9-digit SA mobile number (no leading zero). If we expand to other countries, we'd update the prefix and validation rules and communicate the change.
+
+### Other Fields
+
+**Q: What's the ReferralPartner field?**  
+A: We extract the `productid` query parameter from the landing URL. If the user came through Capitec, ABSA, or another partner flow, you'll see that partner name. Lets you segment drop-offs by acquisition channel.
+
+**Q: Do you capture how far into registration the user got?**  
+A: Not directly in the exit feedback data. We pre-populate the email they entered on the sign-up form, but we don't track which fields they completed. Could be a future enhancement.
+
+### Security & Privacy
+
+**Q: Is there any PII concern with the data you're exposing?**  
+A: Email and phone are optional — only captured when the user explicitly toggles "contact me". The DeviceId is a random GUID. The API is already scoped to a dedicated OAuth client (`nineteen58-exit-feedback`) with its own scope (`idp_exit_feedback_endpoint`). No other IDP APIs or tenant data are accessible.
+
+### Operational
+
+**Q: What's the recommended polling cadence?**  
+A: Per the integration guide: once every 15–60 minutes. Track the latest `dateCreatedUtc` you processed and use it as `fromDate` on the next call. Cache your OAuth token for the full 1-hour lifetime.
+
+**Q: Is the API in production yet?**  
+A: The integration guide says production is "TBC — pending sign-off". UAT is available at `uatidentity.openeasy.io`. Check with Carrie or DevOps on production timeline.
+
+---
+
+## Appendix C — Ticket Reference
+
+| Ticket | Title | Owner | Date | Status |
+|--------|-------|-------|------|--------|
+| OEPE-1820 | Original exit modal | KG | June 2024 | Merged |
+| OEPE-1849 | Form updates | KG | October 2024 | Merged |
+| OEPE-1894 | Form fix | KG | November 2024 | Merged |
+| OEPE-2165 | Exit feedback API for Nineteen58 | KG | April 2026 | On develop/release (not main) |
+| OEPE-2263 | Exit modal redesign | Nathaniel | July 2026 | Merged (PR #624, July 3) |
+| OEPE-2266 | Sub-task | Nathaniel | — | Part of OEPE-2263 |
+| OEPE-2267 | Sub-task | Nathaniel | — | Part of OEPE-2263 |
+| OEPE-2268 | Sub-task | Nathaniel | — | Part of OEPE-2263 |
+| OEPE-2269 | Sub-task | Nathaniel | — | Part of OEPE-2263 |
+| OEPE-2270 | Sub-task | Nathaniel | — | Part of OEPE-2263 |
+
+---
+
+## Appendix D — Key Files Reference
+
+### Exit Modal (Write Path)
+
+| Component | Path |
+|-----------|------|
+| View | `src/.../Views/Default/Registration/BasicRegistration.cshtml` |
+| Controller | `src/.../Controllers/RegistrationController.cs` |
+| Service | `src/.../Services/Registration/RegistrationService.cs` |
+| JS (source) | `src/.../src/js/passwordRequirements/PageScripts/exitRegistration.js` |
+| JS (built) | `src/.../wwwroot/js/exitRegistration.js` |
+| CSS | `src/.../src/css/easyequities.css` |
+| Model | `src/.../Models/ExitFeedbackModel.cs` |
+| DB Context | `src/.../DbContext/ExitRegistrationDbContext.cs` |
+| Constants | `src/.../Constants.cs` |
+| Tests | `test/.../Services/Registration/RegistrationServiceTests.cs` |
+| DeviceId Middleware | `src/.../Middleware/DeviceIdMiddleware.cs` |
+
+### Nineteen58 API (Read Path)
+
+| Component | Path |
+|-----------|------|
+| Controller | `src/.../Features/Api/Controllers/ExitFeedbackController.cs` |
+| Response Model | `src/.../Features/Api/Models/ExitFeedbackResponse.cs` |
+| Query Service | `src/.../Features/Api/Services/ExitFeedbackQueryService.cs` |
+| Query Interface | `src/.../Features/Api/Services/IExitFeedbackQueryService.cs` |
+| API Startup | `src/.../Features/Api/ApiStartupExtensions.cs` |
+| Controller Tests | `test/.../Api/Controllers/ExitFeedbackControllerTests.cs` |
+| Service Tests | `test/.../Api/Services/ExitFeedbackQueryServiceTests.cs` |
+
+---
+
+## Appendix E — Quick Reference Cheat Sheet
+
+### Old vs New Summary
 
 | Aspect | Before (OEPE-1820) | After (OEPE-2263) |
 |--------|--------------------|--------------------|
-| Exit reasons | 4 | **8** |
-| Contact toggle | None | **"Contact me" toggle** |
-| Contact fields | None | **Phone number field** |
-| UI/UX | Basic modal | **Redesigned with better UX** |
-| Unit tests | Basic | **30 unit tests** |
-| Unsettled cash check | None | **OEPE-2193 integration** |
+| Exit reasons | 4 generic | 8 specific + Other |
+| Contact capture | None (email fields commented out) | Toggle with email + phone |
+| Phone number | Not captured | +27 prefix, 9-digit SA number (DB only, not yet in API) |
+| X-close behavior | Always "Closed without feedback" | Saves selected reason + contact data if entered |
+| Validation | None | Client-side blur + server-side Regex sanitization |
+| Unit tests | 0 | 30 tests covering all save paths |
+| CSS | Basic modal styles | BEM-named classes matching Figma designs |
 
-### The 8 Updated Exit Reasons
+### API Impact Summary
 
-1. I'm not using the platform enough
-2. I found a better alternative
-3. I'm unhappy with the service
-4. Fees are too high
-5. The platform is too complicated
-6. I'm having technical issues
-7. I'm consolidating my investments elsewhere
-8. Other
+| Aspect | Detail |
+|--------|--------|
+| Breaking changes | **NONE** — JSON structure unchanged, new reason strings are additive |
+| Auto changes | `exitReason` field values will be different strings for new records |
+| Pending changes | `phoneNumber` and `userDeviceId` not yet in API response |
+| Nineteen58 action | Update parsing logic to handle 8 new exit reason strings |
 
-### Contact Preference Feature
+### Data Flow (One Sentence)
 
-- **Toggle:** "Would you like us to contact you?" (boolean switch)
-- **Phone number:** Appears when toggle is ON — captures a phone number for outreach
-- **Behaviour on X (close) button:** Clicking the X **discards** the form entirely — no data is submitted
-- **Behaviour on Submit:** Only the explicit **Submit** button sends feedback + contact preference to the backend
-
-> **This is critical for Nineteen58:** The contact toggle + phone number is exactly the data point that enables AI agent outreach. When a user opts in, Nineteen58 can initiate a WhatsApp or voice conversation to understand more and attempt retention.
-
-### Unsettled Cash Modal (OEPE-2193)
-
-If the user has unsettled positions (buys exceed sells), an **"Unsettled Cash" modal** is shown before the exit modal. This prevents premature account closure when funds are still in transit.
-
-### Test Coverage
-
-PR #624 includes **30 unit tests** covering:
-
-- Reason selection (single and multiple)
-- Contact toggle state management
-- Phone number validation
-- Form submission vs. dismissal (X button)
-- Edge cases: empty submission, toggle without phone, etc.
-- Integration with unsettled cash flow
-
----
-
-## 5. Data Model: `ExitRegistration` Table
-
-### Schema
-
-| Column | Type | Description |
-|--------|------|-------------|
-| Id | int / bigint | Primary key |
-| UserId | uniqueidentifier | The departing user's ID |
-| Reason | nvarchar | Selected exit reason(s) |
-| ContactMe | bit | Whether user opted in for contact |
-| PhoneNumber | nvarchar | Phone number (if contact opted in) |
-| CreatedDate | datetime | Timestamp of exit submission |
-
-> **Note:** Exact column names may vary — confirm with the DBA. The above reflects the logical model.
-
-### Key Points for Nineteen58
-
-- **No direct integration exists today.** There is no API call, webhook, or data push to Nineteen58 from the IDP codebase.
-- Data is written to the `ExitRegistration` SQL table and stays there.
-- Nineteen58 needs to consume this data somehow — see next section.
-
----
-
-## 6. Data Consumption Options for Nineteen58
-
-This is an **open discussion point** for the meeting. Options include:
-
-| Option | Description | Pros | Cons |
-|--------|-------------|------|------|
-| **Direct DB Read** | Nineteen58 queries the `ExitRegistration` table on a schedule | Simple, fast to implement | Requires DB access, tight coupling |
-| **Scheduled Export** | A scheduled job exports new exit records to CSV/JSON and delivers to Nineteen58 (SFTP, S3, email) | Decoupled, auditable | Latency (not real-time), maintenance |
-| **API Endpoint** | Build a REST API that Nineteen58 calls to fetch recent exit registrations | Clean, standard integration | Requires development effort |
-| **Webhook / Event Push** | On each exit submission, push an event to Nineteen58's endpoint | Real-time, enables immediate outreach | Requires Nineteen58 to expose an endpoint, error handling |
-| **Message Queue** | Publish exit events to a queue (e.g., RabbitMQ, Azure Service Bus) that Nineteen58 consumes | Decoupled, reliable, scalable | Infrastructure overhead |
-
-### Recommendation
-
-For **real-time AI agent outreach** (Nineteen58's strength), a **webhook or event-based approach** would be ideal — the moment a user submits their exit with "contact me" = true, an event fires to Nineteen58, and their AI agent can initiate a conversation within minutes.
-
-For a **quick first implementation**, a **scheduled export** or **API endpoint** may be more practical.
-
-> **Action item from this meeting:** Agree on the integration approach and ownership.
-
----
-
-## 7. Historical Data & Migration Notes
-
-### Data Differences Between Versions
-
-| Aspect | Pre-Redesign Records | Post-Redesign Records |
-|--------|---------------------|-----------------------|
-| Reasons available | 4 original reasons | 8 updated reasons |
-| ContactMe field | Not populated (NULL or false) | Populated based on user toggle |
-| PhoneNumber field | Not populated | Populated when contact opted in |
-| Volume | All historical exits | New exits going forward |
-
-### What Nineteen58 Should Know
-
-1. **Historical records will NOT have contact preferences** — the contact toggle didn't exist before OEPE-2263
-2. **Reason strings changed** — the old 4 reasons and new 8 reasons may overlap but aren't identical; if building analytics/categorisation, account for both sets
-3. **No backfill planned** — old records stay as-is with the original reason strings
-4. **"Other" reason exists in both versions** — free-text may or may not be captured alongside it (confirm with the team)
-
----
-
-## 8. Key Q&A — Anticipated Questions
-
-### "How does the exit modal get triggered?"
-When a user initiates account departure through the EasyEquities platform, the IDP (identityserver) presents the exit modal as part of the closure flow. It's not a standalone page — it's embedded in the departure UX.
-
-### "Can we get real-time notifications when someone exits?"
-Not today. Currently, data is written to the SQL table. Real-time integration would require building a webhook or event pipeline (see Section 6).
-
-### "What if the user closes the modal without submitting?"
-The X (close) button **discards everything**. No data is saved. Only the explicit Submit button persists the exit data. This was a deliberate design decision confirmed with Carrie Ann Singh.
-
-### "Can users select multiple exit reasons?"
-Yes — the redesigned modal supports multi-select for exit reasons.
-
-### "What about the unsettled cash scenario?"
-If a user has unsettled positions (buys > sells), the system shows an "Unsettled Cash" modal (OEPE-2193) **before** the exit modal. This prevents premature departure when money is still in transit.
-
-### "What happens if the user opts in for contact but doesn't enter a phone number?"
-The phone number field is validated — if the toggle is ON, a valid phone number is required before submission. The 30 unit tests cover these edge cases.
-
-### "Is email captured too?"
-The current redesign captures **phone number** as the contact field, not email. The user's email is already available in the system from their account profile, so it could be joined downstream.
-
-### "Who originally built this?"
-KG (Kim Geraldine Fabe) built the original exit modal under OEPE-1820 with 4 reasons and no contact fields. Nathaniel redesigned it under OEPE-2263 (PR #624) with 8 reasons, contact toggle, phone number, and 30 tests.
-
-### "Where does the data live?"
-`ExitRegistration` table in the Identity Server database. No data is pushed externally today.
-
----
-
-## 9. Architecture Overview
-
-```
-User clicks "Close Account"
-         │
-         ▼
-┌─────────────────────────┐
-│   EasyEquities Platform  │
-│   (paymentsDepartureMicro│
-│    / main app)           │
-└────────────┬────────────┘
-             │
-             ▼
-┌─────────────────────────┐     ┌─────────────────────┐
-│   Identity Server (IDP)  │     │  Unsettled Cash      │
-│                          │◄────│  Check (OEPE-2193)   │
-│  ┌─────────────────────┐│     └─────────────────────┘
-│  │   Exit Modal         ││
-│  │  - 8 reasons         ││
-│  │  - Contact toggle    ││
-│  │  - Phone number      ││
-│  └──────────┬──────────┘│
-│             │ Submit     │
-│             ▼            │
-│  ┌─────────────────────┐│
-│  │  ExitRegistration    ││
-│  │  SQL Table           ││
-│  └──────────┬──────────┘│
-└─────────────┼───────────┘
-              │
-              ▼
-    ┌─────────────────┐
-    │   ???            │  ◄── Integration TBD
-    │   Nineteen58     │      (This meeting's discussion)
-    │   AI Agents      │
-    └─────────────────┘
-              │
-              ▼
-    ┌─────────────────┐
-    │  WhatsApp / Voice│
-    │  / Web outreach  │
-    │  to departing    │
-    │  user            │
-    └─────────────────┘
-```
-
----
-
-## 10. Tickets Reference
-
-| Ticket | Title | Owner | Status | Description |
-|--------|-------|-------|--------|-------------|
-| OEPE-1820 | Original Exit Modal | KG (Kim Geraldine Fabe) | Merged | Initial exit modal with 4 reasons, no contact fields |
-| OEPE-2263 | Exit Modal Redesign | Nathaniel Alcantara | Merged (PR #624) | 8 reasons, contact toggle, phone number, 30 tests |
-| OEPE-2193 | Unsettled Cash Modal | Related | Merged | Shows warning when buys exceed sells before exit |
-
----
-
-## 11. Action Items Template
-
-Use this to capture decisions during the meeting:
-
-- [ ] **Integration approach agreed:** _________________________ (DB read / export / API / webhook / queue)
-- [ ] **Data format agreed:** _________________________ (JSON / CSV / direct query)
-- [ ] **Frequency / latency requirement:** _________________________ (real-time / hourly / daily)
-- [ ] **Who builds the integration?** _________________________ (EE team / Nineteen58 / shared)
-- [ ] **Historical data needed?** _________________________ (yes — how far back / no — only new records)
-- [ ] **PII handling confirmed:** _________________________ (phone numbers, user IDs — POPIA compliance)
-- [ ] **Next meeting / follow-up date:** _________________________
-- [ ] **Jira ticket for integration work:** _________________________
-
----
-
-## 12. Quick Stats (Talking Points)
-
-- EasyEquities has **~1.25 million active clients** (as of Feb 2026 interim results)
-- Total client assets: **R94.9 billion** (up 41% YoY)
-- Average user age: **32 years old**
-- Purple Group's board has approved acquisition of an AI technology business (due diligence underway)
-- Platform efficiency ratio improved from 87% (2023) to 52% (2026) — target: 45% within 3 years via AI automation
-- Charles Savage (CEO): *"No technology opportunity has excited me more than placing AI at the centre of the intelligence of our operating system"*
+User clicks Cancel → Modal opens → Selects reason → Optional: toggle contact → Submit or X-close → `POST /Registration/SaveFeedback` → `RegistrationService` → `ExitRegistration` SQL table → `GET /api/exit-feedback` (Nineteen58 polls via OAuth) → `ExitFeedbackQueryService` reads same table
 
 ---
 
